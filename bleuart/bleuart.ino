@@ -8,6 +8,7 @@
 #define SCL_PIN 21
 
 Adafruit_AHTX0 aht;
+bool sensorOK = false;
 
 // BLE Service
 BLEDfu  bledfu;
@@ -19,6 +20,9 @@ BLEBas  blebas;
 void setup()
 {
   Serial.begin(115200);
+  while (!Serial) yield();
+  delay(2000); // give Mac time to fully open the port
+  Serial.println("Starting...");
 
 #if CFG_DEBUG
   while (!Serial) yield();
@@ -27,38 +31,62 @@ void setup()
   Serial.println("BLE UART + AHT20");
 
   // ---------------- BLE SETUP ----------------
+  Serial.println("BLE: configuring...");
   Bluefruit.autoConnLed(true);
   Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
 
+  Serial.println("BLE: begin...");
   Bluefruit.begin();
   Bluefruit.setTxPower(4);
 
+  Serial.println("BLE: setTxPower...");
   Bluefruit.Periph.setConnectCallback(connect_callback);
   Bluefruit.Periph.setDisconnectCallback(disconnect_callback);
 
+  Serial.println("BLE: bledfu...");
   bledfu.begin();
 
+  Serial.println("BLE: bledis...");
   bledis.setManufacturer("Custom");
   bledis.setModel("nRF52840 AHT20");
   bledis.begin();
 
+  Serial.println("BLE: bleuart...");
   bleuart.begin();
+
+  Serial.println("BLE: blebas...");
   blebas.begin();
   blebas.write(100);
 
+  Serial.println("BLE: startAdv...");
   startAdv();
 
   // ---------------- I2C ----------------
+  Serial.println("I2C: begin...");
   Wire.setPins(SDA_PIN, SCL_PIN);
   Wire.begin();
 
-  // ---------------- SENSOR ----------------
-  if (!aht.begin()) {
-    Serial.println("AHT20 not found!");
-    while (1) delay(10);
+  Serial.println("I2C: scanning...");
+for (byte addr = 1; addr < 127; addr++) {
+  Wire.beginTransmission(addr);
+  byte err = Wire.endTransmission();
+  if (err == 0) {
+    Serial.print("Found device at 0x");
+    Serial.println(addr, HEX);
   }
+}
+Serial.println("I2C: scan done");
 
-  Serial.println("AHT20 ready");
+  // ---------------- SENSOR ----------------
+  Serial.println("Sensor: begin...");
+  delay(500); 
+  if (!aht.begin()) {
+    Serial.println("AHT20 not found! Check wiring.");
+  } else {
+    sensorOK = true;
+    Serial.println("AHT20 ready");
+  }
+  Serial.println("Setup complete.");
 }
 
 // ===================== LOOP =====================
@@ -79,6 +107,20 @@ void loop()
     Serial.write(ch);
   }
 
+  static uint32_t lastTime = 0;
+
+  if (millis() - lastTime > 1000)
+  {
+  lastTime = millis();
+
+  Serial.print("notifyEnabled: ");
+  Serial.println(bleuart.notifyEnabled() ? "YES" : "NO");
+
+  if (!sensorOK) {
+    Serial.println("Skipping - no sensor");
+    return;
+  }
+
   sensors_event_t humidity, temp;
   aht.getEvent(&humidity, &temp);
 
@@ -91,13 +133,16 @@ void loop()
   Serial.print(hum);
   Serial.println(" %");
 
+if (Bluefruit.connected())
+{
   bleuart.print("Temp: ");
   bleuart.print(tempC);
   bleuart.print(" C  Hum: ");
   bleuart.print(hum);
   bleuart.println(" %");
+}
 
-  delay(1000);
+  }
 }
 
 // ===================== BLE CALLBACKS =====================
