@@ -27,27 +27,19 @@ void setup()
   delay(2000); // give Mac time to fully open the port
   Serial.println("Starting...");
 
-// #if CFG_DEBUG
-//   while (!Serial) yield();
-// #endif
+#if CFG_DEBUG
+  while (!Serial) yield();
+#endif
 
   Serial.println("BLE UART + AHT20");
 
   // ---------------- BLE SETUP ----------------
   Serial.println("BLE: configuring...");
   Bluefruit.autoConnLed(true);
-  Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);//Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
+  Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
 
   Serial.println("BLE: begin...");
   Bluefruit.begin();
-  Bluefruit.Periph.setConnInterval(40, 80); // ~50–100 ms
-  // Stops LED blinking on connection
-  // Bluefruit.autoConnLed(false);
-  // pinMode(LED_RED, OUTPUT);
-  // digitalWrite(LED_RED, HIGH); // or HIGH depending on active-low config
-
-  // pinMode(LED_BLUE, OUTPUT);  
-  // digitalWrite(LED_BLUE, LOW);
   Bluefruit.setTxPower(0);
 
   Serial.println("BLE: setTxPower...");
@@ -95,24 +87,58 @@ Serial.println("I2C: scan done");
     Serial.println("LIS3DH not found! Check wiring.");
   } else {
     sensorOK = true;
-    myIMU.writeRegister(LIS3DH_CTRL_REG1, 0x24); // 10Hz, z-axis only 
+    myIMU.writeRegister(LIS3DH_CTRL_REG1, 0x77); // 400Hz, all axes
     Serial.println("LIS3DH ready");
   }
   Serial.println("Setup complete.");
 }
 
 // ===================== LOOP =====================
-void loop() {
-  // 1. Read Sensor
-  float z = myIMU.readFloatAccelZ();
-  
-  // 2. Send BLE
-  char buffer[32];
-  int len = snprintf(buffer, sizeof(buffer), "Z:%.3f\n", z);
-  bleuart.write((uint8_t*)buffer, len);
+void loop()
+{
+  while (Serial.available())
+  {
+    delay(2);
 
-  // 3. ACTUAL SLEEP
-  delay(100); 
+    uint8_t buf[64];
+    int count = Serial.readBytes(buf, sizeof(buf));
+    bleuart.write(buf, count);
+  }
+
+  while (bleuart.available())
+  {
+    uint8_t ch = (uint8_t) bleuart.read();
+    Serial.write(ch);
+  }
+
+  static uint32_t lastTime = 0;
+
+  if (millis() - lastTime > 3)
+  {
+  lastTime = millis();
+
+  //Serial.print("notifyEnabled: ");
+  //Serial.println(bleuart.notifyEnabled() ? "YES" : "NO");
+
+  if (!sensorOK) {
+  //   Serial.println("Skipping - no sensor");
+    return;
+  }
+
+// Serial.print("X: "); Serial.print(x);
+// Serial.print(" Y: "); Serial.print(y);
+// Serial.print(" Z: "); Serial.println(z);
+
+if (Bluefruit.connected()) {  // move reads inside connection check
+    float x = myIMU.readFloatAccelX();
+    float y = myIMU.readFloatAccelY();
+    float z = myIMU.readFloatAccelZ();
+    bleuart.print("X: "); bleuart.print(x);
+    bleuart.print(" Y: "); bleuart.print(y);
+    bleuart.print(" Z: "); bleuart.println(z);
+}
+
+  }
 }
 
 // ===================== BLE CALLBACKS =====================

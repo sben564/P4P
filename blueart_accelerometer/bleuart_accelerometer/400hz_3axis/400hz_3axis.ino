@@ -95,24 +95,42 @@ Serial.println("I2C: scan done");
     Serial.println("LIS3DH not found! Check wiring.");
   } else {
     sensorOK = true;
-    myIMU.writeRegister(LIS3DH_CTRL_REG1, 0x24); // 10Hz, z-axis only 
+    myIMU.writeRegister(LIS3DH_CTRL_REG1, 0x77); // 10Hz, z-axis only 
     Serial.println("LIS3DH ready");
   }
   Serial.println("Setup complete.");
 }
 
 // ===================== LOOP =====================
-void loop() {
-  // 1. Read Sensor
-  float z = myIMU.readFloatAccelZ();
-  
-  // 2. Send BLE
-  char buffer[32];
-  int len = snprintf(buffer, sizeof(buffer), "Z:%.3f\n", z);
-  bleuart.write((uint8_t*)buffer, len);
+void loop()
+{
+  // 1. Check if a phone/central is connected
+  if (Bluefruit.connected()) 
+  {
+    if (sensorOK) {
+      // Read sensor
+      float z = myIMU.readFloatAccelZ();
 
-  // 3. ACTUAL SLEEP
-  delay(100); 
+      // Format and send data
+      char buffer[32];
+      int len = snprintf(buffer, sizeof(buffer), "Z:%.3f\n", z);
+      bleuart.write((uint8_t*)buffer, len);
+    }
+
+    // Standard delay during active transmission (10Hz)
+    delay(2); 
+  } 
+  else 
+  {
+    // 2. DISCONNECTED STATE: Deep Sleep
+    // We don't need to read the sensor or send BLE data.
+    // We just wait for a connection.
+    
+    // Serial.println("Disconnected - sleeping..."); // Optional: for debugging
+    
+    // Longer delay reduces CPU wakeups while waiting for a phone
+    delay(100); 
+  }
 }
 
 // ===================== BLE CALLBACKS =====================
@@ -149,3 +167,5 @@ void startAdv(void)
   Bluefruit.Advertising.setFastTimeout(30);
   Bluefruit.Advertising.start(0);
 }
+
+// 18-25mv when not connected, 35mv when connected (more stable)
