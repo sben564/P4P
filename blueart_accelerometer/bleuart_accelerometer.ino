@@ -3,48 +3,12 @@
 #include <InternalFileSystem.h>
 #include <Wire.h>
 #include <SparkFunLIS3DH.h>
-#include <nrf.h>
 
 #define SDA_PIN 20
 #define SCL_PIN 21
 
 LIS3DH myIMU;
 bool sensorOK = false;
-
-// ===================== TIMER INTERRUPT (100ms) =====================
-volatile bool timerInterrupt = false;
-
-void setupTimer100ms()
-{
-  // Configure TIMER2 for 100ms interrupt
-  NRF_TIMER2->TASKS_STOP = 1;
-  NRF_TIMER2->TASKS_CLEAR = 1;
-  
-  NRF_TIMER2->MODE = TIMER_MODE_MODE_Timer;
-  NRF_TIMER2->BITMODE = TIMER_BITMODE_BITMODE_32Bit;
-  NRF_TIMER2->PRESCALER = 4;  // 1 MHz clock (16 MHz / 2^4)
-  
-  // 100ms @ 1MHz = 100,000 ticks
-  NRF_TIMER2->CC[0] = 100000;
-  
-  // Enable interrupt and auto-reload
-  NRF_TIMER2->INTENSET = TIMER_INTENSET_COMPARE0_Msk;
-  NRF_TIMER2->SHORTS = (TIMER_SHORTS_COMPARE0_CLEAR_Enabled << TIMER_SHORTS_COMPARE0_CLEAR_Pos);
-  
-  NVIC_SetPriority(TIMER2_IRQn, 7);
-  NVIC_EnableIRQ(TIMER2_IRQn);
-  
-  NRF_TIMER2->TASKS_START = 1;
-}
-
-extern "C" void TIMER2_IRQHandler(void)
-{
-  if (NRF_TIMER2->EVENTS_COMPARE[0] != 0)
-  {
-    NRF_TIMER2->EVENTS_COMPARE[0] = 0;
-    timerInterrupt = true;
-  }
-}
 
 // BLE Service
 BLEDfu  bledfu;
@@ -56,35 +20,24 @@ BLEBas  blebas;
 void setup()
 {
   Serial.begin(115200);
-  unsigned long t0 = millis();
-  //while (!Serial && millis() - t0 < 3000) {
-    //yield(); // wait max 3 seconds
-  //}
+  while (!Serial) yield();
   delay(2000); // give Mac time to fully open the port
   Serial.println("Starting...");
 
-// #if CFG_DEBUG
-//   while (!Serial) yield();
-// #endif
+#if CFG_DEBUG
+  while (!Serial) yield();
+#endif
 
   Serial.println("BLE UART + AHT20");
 
   // ---------------- BLE SETUP ----------------
   Serial.println("BLE: configuring...");
   Bluefruit.autoConnLed(true);
-  Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);//Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
+  Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
 
   Serial.println("BLE: begin...");
   Bluefruit.begin();
-  Bluefruit.Periph.setConnInterval(40, 80); // ~50–100 ms
-  // Stops LED blinking on connection
-  // Bluefruit.autoConnLed(false);
-  // pinMode(LED_RED, OUTPUT);
-  // digitalWrite(LED_RED, HIGH); // or HIGH depending on active-low config
-
-  // pinMode(LED_BLUE, OUTPUT);  
-  // digitalWrite(LED_BLUE, LOW);
-  Bluefruit.setTxPower(0);
+  Bluefruit.setTxPower(4);
 
   Serial.println("BLE: setTxPower...");
   Bluefruit.Periph.setConnectCallback(connect_callback);
@@ -131,50 +84,57 @@ Serial.println("I2C: scan done");
     Serial.println("LIS3DH not found! Check wiring.");
   } else {
     sensorOK = true;
-    myIMU.writeRegister(LIS3DH_CTRL_REG1, 0x77); // 10Hz, z-axis only 
     Serial.println("LIS3DH ready");
   }
-
-  // ---------------- TIMER ----------------
-  Serial.println("Timer: begin...");
-  setupTimer100ms();
-
   Serial.println("Setup complete.");
 }
 
 // ===================== LOOP =====================
 void loop()
 {
-  // Sleep until timer interrupt fires
-  if (!timerInterrupt)
+  while (Serial.available())
   {
-    // Enter low-power sleep mode, wake on timer interrupt
-    __WFE();
+    delay(2);
+
+    uint8_t buf[64];
+    int count = Serial.readBytes(buf, sizeof(buf));
+    bleuart.write(buf, count);
+  }
+
+  while (bleuart.available())
+  {
+    uint8_t ch = (uint8_t) bleuart.read();
+    Serial.write(ch);
+  }
+
+  static uint32_t lastTime = 0;
+
+  if (millis() - lastTime > 1000)
+  {
+  lastTime = millis();
+
+  Serial.print("notifyEnabled: ");
+  Serial.println(bleuart.notifyEnabled() ? "YES" : "NO");
+
+  if (!sensorOK) {
+    Serial.println("Skipping - no sensor");
     return;
   }
 
-  // Timer fired: clear flag and do work
-  noInterrupts();
-  timerInterrupt = false;
-  interrupts();
+  float x = myIMU.readFloatAccelX();
+float y = myIMU.readFloatAccelY();
+float z = myIMU.readFloatAccelZ();
 
-  // Service happens every 100ms
-  if (Bluefruit.connected()) 
-  {
-    if (sensorOK) {
-      // Read sensor
-      float z = myIMU.readFloatAccelZ();
+Serial.print("X: "); Serial.print(x);
+Serial.print(" Y: "); Serial.print(y);
+Serial.print(" Z: "); Serial.println(z);
 
-      // Format and send data
-      char buffer[32];
-      int len = snprintf(buffer, sizeof(buffer), "Z:%.3f\n", z);
-      bleuart.write((uint8_t*)buffer, len);
-    }
-  }
-  else
-  {
-    // DISCONNECTED STATE: Still checking every 100ms (lower power than delay(100))
-    // because __WFE() puts the MCU to sleep between timer interrupts
+if (Bluefruit.connected()) {
+    bleuart.print("X: "); bleuart.print(x);
+    bleuart.print(" Y: "); bleuart.print(y);
+    bleuart.print(" Z: "); bleuart.println(z);
+}
+
   }
 }
 
@@ -207,10 +167,7 @@ void startAdv(void)
   Bluefruit.ScanResponse.addName();
 
   Bluefruit.Advertising.restartOnDisconnect(true);
-  Bluefruit.Advertising.setInterval(160, 160);
-  //Bluefruit.Advertising.setInterval(32, 244);
+  Bluefruit.Advertising.setInterval(32, 244);
   Bluefruit.Advertising.setFastTimeout(30);
   Bluefruit.Advertising.start(0);
 }
-
-// 18-25mv when not connected, 35mv when connected (more stable)
