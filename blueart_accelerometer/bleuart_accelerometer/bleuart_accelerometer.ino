@@ -95,7 +95,7 @@ Serial.println("I2C: scan done");
     Serial.println("LIS3DH not found! Check wiring.");
   } else {
     sensorOK = true;
-    myIMU.writeRegister(LIS3DH_CTRL_REG1, 0x24); // 10Hz, z-axis only 
+    myIMU.writeRegister(LIS3DH_CTRL_REG1, 0x00); // 10Hz, z-axis only 
     Serial.println("LIS3DH ready");
   }
   Serial.println("Setup complete.");
@@ -104,15 +104,15 @@ Serial.println("I2C: scan done");
 // ===================== LOOP =====================
 void loop() {
   // 1. Read Sensor
-  float z = myIMU.readFloatAccelZ();
+  //float z = myIMU.readFloatAccelZ();
   
   // 2. Send BLE
-  char buffer[32];
-  int len = snprintf(buffer, sizeof(buffer), "Z:%.3f\n", z);
-  bleuart.write((uint8_t*)buffer, len);
+  //char buffer[32];
+  //int len = snprintf(buffer, sizeof(buffer), "Z:%.3f\n", z);
+  //bleuart.write((uint8_t*)buffer, len);
 
   // 3. ACTUAL SLEEP
-  delay(100); 
+  //delay(2); 
 }
 
 // ===================== BLE CALLBACKS =====================
