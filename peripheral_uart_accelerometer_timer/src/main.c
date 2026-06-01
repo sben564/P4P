@@ -99,6 +99,11 @@ UART_ASYNC_ADAPTER_INST_DEFINE(async_adapter);
 #define async_adapter NULL
 #endif
 
+static void accel_timer_expiry(struct k_timer *timer) 
+{
+	k_sem_give(&accel_sem); // Signal the accelerometer thread to read and send data (Unlocks accel thread which is waiting on this semaphore)
+}
+
 /* ────────────────────────────────────────────
  * LIS3DH accelerometer read + BLE transmit
  * SDA = P27, SCL = P26
@@ -398,11 +403,6 @@ static int uart_init(void)
 /* ────────────────────────────────────────────
  * BLE callbacks 
  * ──────────────────────────────────────────── */
-
-static void accel_timer_expiry(struct k_timer *timer) 
-{
-	k_sem_give(&accel_sem); // Signal the accelerometer thread to read and send data (Unlocks accel thread which is waiting on this semaphore)
-}
 
 static void adv_work_handler(struct k_work *work)
 {
