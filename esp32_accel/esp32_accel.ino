@@ -151,6 +151,8 @@ bool connectToServer()
 void setup()
 {
     Serial.begin(115200);
+    Wire.begin();
+    Wire.setClock(400000);  // ← add this
 
     if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
         Serial.println("OLED init failed");

@@ -50,14 +50,16 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 #define UART_WAIT_FOR_BUF_DELAY K_MSEC(50)
 #define UART_WAIT_FOR_RX CONFIG_BT_NUS_UART_RX_WAIT_TIME
 
-/* Accelerometer transmit interval — 100ms = 10Hz */
-#define ACCEL_INTERVAL_MS 100
+/* Accelerometer transmit interval — 1000ms = 1Hz */
+#define ACCEL_INTERVAL_MS 1000
 
 static K_SEM_DEFINE(ble_init_ok, 0, 1);
 
 static struct bt_conn *current_conn;
 static struct bt_conn *auth_conn;
 static struct k_work adv_work;
+static struct k_timer accel_timer;
+static struct k_sem accel_sem;
 
 /* LIS3DH device handle */
 const struct device *const accel_dev = DEVICE_DT_GET_ANY(st_lis2dh);
@@ -174,10 +176,12 @@ static void accel_thread_fn(void)
 {
 	k_sem_take(&ble_init_ok, K_FOREVER);
 	k_sem_give(&ble_init_ok);
+	k_timer_init(&accel_timer, accel_timer_expiry, NULL);
+	k_timer_start(&accel_timer, K_MSEC(ACCEL_INTERVAL_MS), K_MSEC(ACCEL_INTERVAL_MS));
 
 	while (1) {
+		k_sem_take(&accel_sem, K_FOREVER);
 		send_accel_over_ble();
-		k_sleep(K_MSEC(ACCEL_INTERVAL_MS));
 	}
 }
 
@@ -353,7 +357,7 @@ static int uart_init(void)
 		}
 		LOG_INF("DTR set");
 		err = uart_line_ctrl_set(uart, UART_LINE_CTRL_DCD, 1);
-		if (err) LOG_WRN("Failed to set DCD, ret code %d", err);
+		if (err) LOG_WRN("Failed to set DCD,xret code %d", err);
 		err = uart_line_ctrl_set(uart, UART_LINE_CTRL_DSR, 1);
 		if (err) LOG_WRN("Failed to set DSR, ret code %d", err);
 	}
@@ -392,8 +396,13 @@ static int uart_init(void)
 }
 
 /* ────────────────────────────────────────────
- * BLE callbacks — unchanged
+ * BLE callbacks 
  * ──────────────────────────────────────────── */
+
+static void accel_timer_expiry(struct k_timer *timer) 
+{
+	k_sem_give(&accel_sem); // Signal the accelerometer thread to read and send data (Unlocks accel thread which is waiting on this semaphore)
+}
 
 static void adv_work_handler(struct k_work *work)
 {
@@ -413,6 +422,22 @@ static void advertising_start(void)
 static void connected(struct bt_conn *conn, uint8_t err)
 {
 	char addr[BT_ADDR_LE_STR_LEN];
+
+	struct bt_le_conn_param param = {
+        .interval_min = 6,   // 7.5ms
+        .interval_max = 6,
+        .latency      = 0,
+        .timeout      = 400,
+    };
+    bt_conn_le_param_update(conn, &param);
+
+	struct bt_conn_info info;
+    if (bt_conn_get_info(conn, &info) == 0) {
+        LOG_INF("Conn interval: %d units (%d ms)",
+            info.le.interval,
+            info.le.interval * 125 / 100);  // 1 unit = 1.25ms
+    }
+	
 	if (err) {
 		LOG_ERR("Connection failed, err 0x%02x %s", err, bt_hci_err_to_str(err));
 		return;
@@ -625,7 +650,16 @@ int main(void)
     	//accel_dev = NULL;
 	} else {
     	LOG_INF("LIS3DH ready");
-		printk("LIS3DH ready\n");
+		/* Set ODR to target Hz */
+		int target_hz = ACCEL_INTERVAL_MS/1000;  // Convert ms to Hz
+    	struct sensor_value odr = { .val1 = target_hz, .val2 = 0 };
+    	int err2 = sensor_attr_set(accel_dev, SENSOR_CHAN_ACCEL_XYZ,
+                               SENSOR_ATTR_SAMPLING_FREQUENCY, &odr);
+    	if (err2) {
+        	LOG_ERR("Failed to set ODR: %d", err2);
+    	} else {
+        	LOG_INF("ODR set to %d Hz", target_hz);
+    	}
 	}
 
 	err = uart_init();
