@@ -132,6 +132,9 @@ bool connectToServer()
         return false;
     }
 
+    pClient->updateConnParams(6, 6, 0, 400);
+    Serial.println("Connection params updated: 7.5ms interval");
+
     NimBLERemoteService *pService = pClient->getService(NUS_SERVICE_UUID);
     if (!pService) { pClient->disconnect(); return false; }
 

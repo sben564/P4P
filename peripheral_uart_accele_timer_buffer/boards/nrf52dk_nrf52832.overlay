@@ -1,0 +1,27 @@
+&i2c0 {
+    status = "okay";
+    pinctrl-0 = <&i2c0_default>;
+    pinctrl-1 = <&i2c0_sleep>;
+    pinctrl-names = "default", "sleep";
+
+    lis3dh: lis3dh@19 {
+        compatible = "st,lis2dh";
+        reg = <0x19>;
+        status = "okay";
+    };
+};
+
+&i2c0_default {
+    group1 {
+        psels = <NRF_PSEL(TWIM_SDA, 0, 27)>,
+                <NRF_PSEL(TWIM_SCL, 0, 26)>;
+    };
+};
+
+&i2c0_sleep {
+    group1 {
+        psels = <NRF_PSEL(TWIM_SDA, 0, 27)>,
+                <NRF_PSEL(TWIM_SCL, 0, 26)>;
+        low-power-enable;
+    };
+};

@@ -8,6 +8,7 @@
 #include <zephyr/types.h>
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/uart.h>
+#include <zephyr/drivers/i2c.h>
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <soc.h>
@@ -50,8 +51,26 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 #define UART_WAIT_FOR_BUF_DELAY K_MSEC(50)
 #define UART_WAIT_FOR_RX CONFIG_BT_NUS_UART_RX_WAIT_TIME
 
-/* Accelerometer transmit interval — 1000ms = 1Hz */
-#define ACCEL_INTERVAL_MS 10
+#define ACCEL_SAMPLE_RATE_HZ 10
+#define ACCEL_INTERVAL_MS (1000 / ACCEL_SAMPLE_RATE_HZ) 
+
+#define SAMPLES_PER_PACKET 20  // 4 header + 20×6 = 124 bytes — safe under 244
+#define LIS3DH_ADDR 0x19  // change to 0x18 if SA0 pin is low
+#define LIS3DH_CTRL_REG2 0x21
+
+typedef struct {
+    int16_t x;
+    int16_t y;
+    int16_t z;
+} __attribute__((packed)) accel_sample_t;
+
+/* compile-time check — will error if packet exceeds BLE payload */
+BUILD_ASSERT((4 + SAMPLES_PER_PACKET * sizeof(accel_sample_t)) <= 244,
+             "Packet too large for BLE MTU");
+
+// Static buffer holding pending samples
+static accel_sample_t sample_buf[SAMPLES_PER_PACKET];
+static uint8_t sample_count = 0;
 
 K_SEM_DEFINE(accel_sem, 0, 1);  // initial=0, max=1
 K_SEM_DEFINE(ble_init_ok, 0, 1); 
@@ -111,72 +130,88 @@ static void accel_timer_expiry(struct k_timer *timer)
  * SDA = P27, SCL = P26
  * ──────────────────────────────────────────── */
 
+/* ── REPLACED: now buffers samples and sends in binary bursts ── */
+static inline int16_t sv_to_i16(struct sensor_value *v)
+{
+    /* Converts sensor_value to int16 in units of 0.01 m/s²
+     * val1 = whole m/s², val2 = millionths of m/s² */
+    return (int16_t)(v->val1 * 100 + v->val2 / 10000);
+}
+
 static void send_accel_over_ble(void)
 {
+    if (!device_is_ready(accel_dev)) {
+        LOG_ERR("Accel device NOT ready");
+        return;
+    }
 
-	if (!device_is_ready(accel_dev)) {
-    LOG_ERR("Accel device NOT ready at boot");
-	return;
-	}	
+    if (!current_conn) {
+        return;
+    }
 
-	if (!current_conn) {
-		return;
-	}
+    struct sensor_value accel[3];
 
-	if (!accel_dev || !device_is_ready(accel_dev)) {
-		LOG_ERR("LIS3DH not ready");
-		return;
-	}
+    if (sensor_sample_fetch(accel_dev) ||
+        sensor_channel_get(accel_dev, SENSOR_CHAN_ACCEL_XYZ, accel)) {
+        LOG_ERR("Accel read failed");
+        return;
+    }
 
-	struct sensor_value accel[3];
-	int err;
+    /* Append sample to buffer */
+    sample_buf[sample_count].x = sv_to_i16(&accel[0]);
+    sample_buf[sample_count].y = sv_to_i16(&accel[1]);
+    sample_buf[sample_count].z = sv_to_i16(&accel[2]);
+    sample_count++;
 
-	err = sensor_sample_fetch(accel_dev);
-	if (err) {
-		LOG_ERR("Failed to fetch accel sample: %d", err);
-		return;
-	}
+    /* Only transmit when buffer is full */
+    if (sample_count >= SAMPLES_PER_PACKET) {
 
-	err = sensor_channel_get(accel_dev, SENSOR_CHAN_ACCEL_XYZ, accel);
-	if (err) {
-		LOG_ERR("Failed to get accel data: %d", err);
-		return;
-	}
+        /* Packet layout: [0xAC][count][interval_lo][interval_hi][...samples...] */
+        uint8_t pkt[4 + SAMPLES_PER_PACKET * sizeof(accel_sample_t)];
+        pkt[0] = 0xAC;
+        pkt[1] = SAMPLES_PER_PACKET;
+        pkt[2] = ACCEL_INTERVAL_MS & 0xFF;
+        pkt[3] = (ACCEL_INTERVAL_MS >> 8) & 0xFF;
+        memcpy(&pkt[4], sample_buf, sizeof(sample_buf));
 
-	/* Convert sensor_value to integer + decimal parts
-	 * avoiding float printf which can cause issues on ARM */
-	int x_whole   = accel[0].val1;
-	int x_dec     = abs(accel[0].val2) / 10000;
-	int y_whole   = accel[1].val1;
-	int y_dec     = abs(accel[1].val2) / 10000;
-	int z_whole   = accel[2].val1;
-	int z_dec     = abs(accel[2].val2) / 10000;
+        int err = bt_nus_send(NULL, pkt, sizeof(pkt));
+        if (err) {
+            LOG_WRN("BLE send failed: %d", err);
+        } else {
+            LOG_INF("Sent %d samples (%d bytes)", SAMPLES_PER_PACKET, (int)sizeof(pkt));
+        }
 
-	/* Handle negative decimals correctly */
-	char x_sign = (accel[0].val1 == 0 && accel[0].val2 < 0) ? '-' : ' ';
-	char y_sign = (accel[1].val1 == 0 && accel[1].val2 < 0) ? '-' : ' ';
-	char z_sign = (accel[2].val1 == 0 && accel[2].val2 < 0) ? '-' : ' ';
-
-	/* Format: "ACCEL:X:1.23,Y:-0.45,Z:9.81\r\n" */
-	char buf[64];
-	int len = snprintf(buf, sizeof(buf),
-			   "ACCEL:X:%c%d.%02d,Y:%c%d.%02d,Z:%c%d.%02d\r\n",
-			   x_sign, x_whole, x_dec,
-			   y_sign, y_whole, y_dec,
-			   z_sign, z_whole, z_dec);
-
-	if (len <= 0 || len >= sizeof(buf)) {
-		LOG_ERR("Accel format error");
-		return;
-	}
-
-	err = bt_nus_send(NULL, (uint8_t *)buf, len);
-	if (err) {
-		LOG_WRN("BLE send failed (err: %d)", err);
-	} else {
-		LOG_INF("Sent: %s", buf);
-	}
+        sample_count = 0;   /* reset buffer */
+    }
 }
+/* ─────────────────────────────────────────────────── */
+
+/* ── NEW: enable LIS3DH hardware high-pass filter (gravity cancellation) ── */
+static int lis3dh_enable_hpf(void)
+{
+    const struct device *i2c_dev =
+        DEVICE_DT_GET(DT_BUS(DT_COMPAT_GET_ANY_STATUS_OKAY(st_lis2dh)));
+
+    if (!device_is_ready(i2c_dev)) {
+        LOG_ERR("I2C bus not ready for HPF config");
+        return -ENODEV;
+    }
+
+    /* CTRL_REG2 = 0x08
+     * FDS=1  (bit3) — route HPF output to data registers
+     * HPM=00        — normal mode
+     * HPCF=00       — highest cutoff (~2Hz at 100Hz ODR), removes DC gravity */
+    uint8_t buf[2] = { LIS3DH_CTRL_REG2, 0x08 };
+    int err = i2c_write(i2c_dev, buf, sizeof(buf), LIS3DH_ADDR);
+    if (err) {
+        LOG_ERR("Failed to write CTRL_REG2: %d", err);
+        return err;
+    }
+
+    LOG_INF("LIS3DH HPF enabled — gravity cancelled");
+    return 0;
+}
+/* ──────────────────────────────────────────────────────────────────────── */
 
 /* Accelerometer thread */
 static void accel_thread_fn(void)
@@ -443,17 +478,25 @@ static void connected(struct bt_conn *conn, uint8_t err)
         info.le.interval * 125 / 100);
 
     // 3. Request tighter interval AFTER confirming connection is valid
-    struct bt_le_conn_param param = {
-        .interval_min = 6,    // 7.5ms
-        .interval_max = 6,
-        .latency      = 0,
-        .timeout      = 400,  // 4 second supervision timeout
-    };
+    // struct bt_le_conn_param param = {
+    //     .interval_min = 6,    // 7.5ms
+    //     .interval_max = 6,
+    //     .latency      = 0,
+    //     .timeout      = 4000,  // 4 second supervision timeout
+    // };
+	// 3. connection interval AFTER confirming connection is valid
+	struct bt_le_conn_param param = {
+    .interval_min = ACCEL_INTERVAL_MS * SAMPLES_PER_PACKET/2,  
+    .interval_max = ACCEL_INTERVAL_MS * SAMPLES_PER_PACKET/2,
+    .latency      = 0,
+    .timeout      = 400,
+};
+
     int ret = bt_conn_le_param_update(conn, &param);
     if (ret) {
         LOG_WRN("Failed to request conn param update: %d", ret);
     } else {
-        LOG_INF("Conn param update requested (7.5ms interval)");
+        LOG_INF("Conn param update requested (%d interval)", ACCEL_INTERVAL_MS * SAMPLES_PER_PACKET/2);
     }
 	k_timer_start(&accel_timer, K_MSEC(500), K_MSEC(ACCEL_INTERVAL_MS)); 
 }
@@ -611,6 +654,15 @@ static struct bt_nus_cb nus_cb = {
 	.received = bt_receive_cb,
 };
 
+static void att_mtu_updated(struct bt_conn *conn, uint16_t tx, uint16_t rx)
+{
+	LOG_INF("ATT MTU updated: TX=%d RX=%d bytes", tx, rx);
+}
+
+static struct bt_gatt_cb gatt_callbacks = {
+	.att_mtu_updated = att_mtu_updated,
+};
+
 void error(void)
 {
 	dk_set_leds_state(DK_ALL_LEDS_MSK, DK_NO_LEDS_MSK);
@@ -663,10 +715,9 @@ int main(void)
 	int blink_status = 0;
 	int err = 0;
 
-	configure_gpio();
+	configure_gpio(); // configures LEDs and buttons
 
 	/* Init LIS3DH */
-	//accel_dev = DEVICE_DT_GET(DT_NODELABEL(lis3dh));
 	if (!device_is_ready(accel_dev)) {
     	LOG_ERR("LIS3DH not ready — check wiring/overlay");
 		printk("System booted\n");
@@ -674,15 +725,15 @@ int main(void)
 	} else {
     	LOG_INF("LIS3DH ready");
 		/* Set ODR to target Hz */
-		int target_hz = 1000 / ACCEL_INTERVAL_MS;  // Convert ms to Hz
-    	struct sensor_value odr = { .val1 = target_hz, .val2 = 0 };
+    	struct sensor_value odr = { .val1 = ACCEL_SAMPLE_RATE_HZ, .val2 = 0 };
     	int err2 = sensor_attr_set(accel_dev, SENSOR_CHAN_ACCEL_XYZ,
                                SENSOR_ATTR_SAMPLING_FREQUENCY, &odr);
     	if (err2) {
         	LOG_ERR("Failed to set ODR: %d", err2);
     	} else {
-        	LOG_INF("ODR set to %d Hz", target_hz);
+        	LOG_INF("ODR set to %d Hz", ACCEL_SAMPLE_RATE_HZ);
     	}
+		lis3dh_enable_hpf();
 	}
 
 	err = uart_init();
@@ -722,6 +773,7 @@ int main(void)
 	}
 
 	k_work_init(&adv_work, adv_work_handler);
+	bt_gatt_cb_register(&gatt_callbacks);
 	advertising_start();
 
 	for (;;) {
