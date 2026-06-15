@@ -2,6 +2,7 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include "arduinoFFT.h"
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
@@ -11,6 +12,19 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 #define NUS_TX_CHAR_UUID  "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
 
 #define MAX_SAMPLES_PER_PACKET 40 
+
+// ── FFT config ────────────────────────────────────────────────────────────────
+#define FFT_SAMPLES     128          // must be power of 2
+#define SAMPLE_RATE_HZ  100          // must match nRF ACCEL_SAMPLE_RATE_HZ
+
+static double vReal[FFT_SAMPLES];
+static double vImag[FFT_SAMPLES];
+static int fft_index = 0;
+static float dominant_freq = 0.0f;
+static bool fft_ready = false;
+
+/* Create FFT object */
+ArduinoFFT<double> FFT = ArduinoFFT<double>(vReal, vImag, FFT_SAMPLES, SAMPLE_RATE_HZ);
 
 static NimBLEClient          *pClient        = nullptr;
 static bool                   doConnect      = false;
@@ -32,6 +46,39 @@ static uint16_t     playback_interval = 10;
 static hw_timer_t  *sampleTimer       = NULL;
 static portMUX_TYPE timerMux          = portMUX_INITIALIZER_UNLOCKED;
 static volatile bool showNextSample   = false;
+
+// -- FFT Calculation --
+void PerformFFT() {
+
+    // Apply AHmming Window to reduce spectral leakage
+    FFT.windowing(FFTWindow::Hamming, FFTDirection::Forward);
+
+    //Compute the FFT
+    FFT.compute(FFTDirection::Forward); 
+
+    //Convert complex output to magnitude
+    FFT.complexToMagnitude();
+
+    //Find the dominant frequency
+    double peak = FFT.majorPeak();
+
+    //Ignore DC component (0Hz) and very low frequencies
+    if (peak < 1.0) peak = 0.0;
+
+    dominant_freq = (float)peak;
+    fft_ready = true;
+
+    // Print full spectrum to Serial for debugging
+    Serial.printf("FFT complete — dominant: %.2f Hz\n", dominant_freq);
+    Serial.println("Spectrum (bin: freq Hz = magnitude):");
+    for (int i = 1; i < FFT_SAMPLES / 2; i++) {
+        float bin_freq = (float)i * SAMPLE_RATE_HZ / FFT_SAMPLES;
+        if (vReal[i] > 10.0) {   // only print significant bins
+            Serial.printf("  bin %3d: %5.1f Hz = %.1f\n", i, bin_freq, vReal[i]);
+        }
+    }
+
+}
 
 // ── Timer ISR — fires every interval_ms ──────────────────────────────────────
 void IRAM_ATTR onSampleTimer()
@@ -118,6 +165,52 @@ void showAccelerometer(float ax, float ay, float az)
     display.display();
 }
 
+void showFFT(float freq, float ax, float ay ,float az) 
+{
+    display.clearDisplay();
+
+    // Header bar
+    display.fillRect(0, 0, SCREEN_WIDTH, 12, SSD1306_WHITE);
+    display.setTextColor(SSD1306_BLACK);
+    display.setTextSize(1);
+    display.setCursor(4, 2);
+    display.print("nRF52832 Monitor");
+
+    display.setTextColor(SSD1306_WHITE);
+    display.setTextSize(1);
+
+    // Dominant frequency — large text
+    display.setCursor(0, 14);
+    display.print("Vib:");
+    display.setTextSize(2);
+    display.setCursor(30, 12);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%.1fHz", freq);
+    display.println(buf);
+
+    // Current acceleration values — small text below
+    display.setTextSize(1);
+    display.setCursor(0, 34);
+    snprintf(buf, sizeof(buf), "X:%.2f", ax);
+    display.print(buf);
+    display.setCursor(44, 34);
+    snprintf(buf, sizeof(buf), "Y:%.2f", ay);
+    display.print(buf);
+    display.setCursor(88, 34);
+    snprintf(buf, sizeof(buf), "Z:%.2f", az);
+    display.print(buf);
+
+    // Progress bar showing FFT buffer fill level
+    display.setCursor(0, 46);
+    display.print("FFT buf:");
+    int bar_width = (fft_index * 70) / FFT_SAMPLES;  // scale to 70 pixels
+    display.fillRect(50, 47, bar_width, 8, SSD1306_WHITE);
+    display.drawRect(50, 47, 70, 8, SSD1306_WHITE);   // outline
+
+    display.display();
+
+}
+
 // ── Binary packet unpacker ────────────────────────────────────────────────────
 bool parseBinaryPacket(const uint8_t *data, size_t length,
                        AccelSample *samples_out, uint8_t &count_out,
@@ -157,6 +250,29 @@ void notifyCallback(NimBLERemoteCharacteristic *pChar,
     if (!parseBinaryPacket(pData, length, samples, count, interval_ms)) {
         return;
     }
+
+    // ── Feed samples into FFT accumulation buffer ─────────────────────────
+    for (int i = 0; i < count && fft_index < FFT_SAMPLES; i++) {
+
+        // Convert int16 to m/s² float and feed into real part
+        // Using X axis — change to .y or .z for different axis
+        // or use magnitude: sqrt(x²+y²+z²) for total vibration
+        float ax = samples[i].x / 100.0f;
+        float ay = samples[i].y / 100.0f;
+        float az = samples[i].z / 100.0f;
+
+        // Total magnitude — captures vibration in any direction
+        vReal[fft_index] = sqrt(ax*ax + ay*ay + az*az);
+        vImag[fft_index] = 0.0;   // imaginary part always 0 for real signals
+        fft_index++;
+    }
+
+    // When buffer full, run FFT then reset for next window
+    if (fft_index >= FFT_SAMPLES) {
+        PerformFFT();
+        fft_index = 0;   // reset — start accumulating next window
+    }
+    // ─────────────────────────────────────────────────────────────────────
 
     // Load new samples into playback buffer under lock
     portENTER_CRITICAL(&timerMux);
@@ -263,6 +379,8 @@ void loop()
             timerEnd(sampleTimer);
             sampleTimer = NULL;
         }
+        fft_index = 0;          // reset FFT buffer on disconnect
+        fft_ready = false;
         showStatus("Disconnected", "Scanning...");
         NimBLEDevice::getScan()->start(0);
     }
@@ -278,10 +396,13 @@ void loop()
             float ax = playback_buf[idx].x / 100.0f;
             float ay = playback_buf[idx].y / 100.0f;
             float az = playback_buf[idx].z / 100.0f;
-
-            showAccelerometer(ax, ay, az);
-            Serial.printf("[%2d/%2d] X=%.2f Y=%.2f Z=%.2f\n",
-                          idx + 1, playback_count, ax, ay, az);
+            
+            showFFT(dominant_freq, ax, ay, az);
+            Serial.printf("[%2d/%2d] X=%.2f Y=%.2f Z=%.2f | Vib: %.1fHz\n",
+                          idx + 1, playback_count, ax, ay, az, dominant_freq);
+            //showAccelerometer(ax, ay, az);
+            //Serial.printf("[%2d/%2d] X=%.2f Y=%.2f Z=%.2f\n",
+                          //idx + 1, playback_count, ax, ay, az);
         }
     }
 
