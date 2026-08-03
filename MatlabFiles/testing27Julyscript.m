@@ -1,0 +1,201 @@
+%% plot_power_comparison.m
+%
+% Imports current-consumption data from an Excel file using positional
+% column indexing, then plots the "Full Program" traces on the top
+% subplot and the "Minimal Program" traces on the bottom subplot,
+% both sharing the common Time column.
+
+clear; clc; close all;
+
+%% ---------------- IMPORT ----------------
+FILE_NAME = "testing27July.xlsx";   % <-- path to your Excel file
+T = readtable(FILE_NAME,...
+    'VariableNamingRule','preserve');
+
+Time = T{:,4};
+
+stripNaN = @(x) x(~isnan(x));
+
+Full_1_9V_PS_nocap = stripNaN(T{:,1});
+Full_3_3V_PS_cap   = stripNaN(T{:,2});
+Full_3_3V_PS_nocap = stripNaN(T{:,3});
+
+Min_1_9V_PS_cap    = stripNaN(T{:,5});
+Min_1_9V_PS_nocap  = stripNaN(T{:,6});
+Min_2_4V_PS_nocap  = stripNaN(T{:,7});
+Min_2_8V_PS_nocap  = stripNaN(T{:,8});
+Min_3_3V_PS_nocap  = stripNaN(T{:,9});
+Min_J_Link_nocap   = stripNaN(T{:,10});
+
+%% Calculate RMS values
+Irms_1_9V_nocap  = 1000 * rms(Full_1_9V_PS_nocap)/10.7;
+Irms_3_3V_cap    = 1000 * rms(Full_3_3V_PS_cap)/10.7;
+Irms_3_3V_nocap  = 1000 * rms(Full_3_3V_PS_nocap)/10.7;
+
+Avg_Pwr_1_9V_nocap  = 1.9 * Irms_1_9V_nocap;
+Avg_Pwr_3_3V_cap    = 3.3 * Irms_3_3V_cap;
+Avg_Pwr_3_3V_nocap  = 3.3 * Irms_3_3V_nocap;
+fprintf('FULL PROGRAM: \n\n')
+fprintf('1.9V PS (w/out cap) current: %.4f mA \n', Irms_1_9V_nocap);
+fprintf('3.3V PS (w/ cap) current:    %.4f mA \n', Irms_3_3V_cap);
+fprintf('3.3V PS (w/out cap) current: %.4f mA \n\n', Irms_3_3V_nocap);
+
+fprintf('AVG Power 1.9V PS (w/out cap): %.4f mW \n', Avg_Pwr_1_9V_nocap);
+fprintf('AVG Power 3.3V PS (w/ cap):    %.4f mW \n', Avg_Pwr_3_3V_cap);
+fprintf('AVG Power 3.3V PS (w/out cap): %.4f mW \n\n', Avg_Pwr_3_3V_nocap);
+
+%% Calculate RMS values
+
+I_Min_1_9V_PS_cap_min = 1000 * rms(Min_1_9V_PS_cap)/10.7;
+I_Min_1_9V_PS_nocap_min = 1000 * rms(Min_1_9V_PS_nocap)/10.7;
+I_Min_2_4V_PS_nocap_min = 1000 * rms(Min_2_4V_PS_nocap)/10.7;
+I_Min_2_8V_PS_nocap_min = 1000 * rms(Min_2_8V_PS_nocap)/10.7;
+I_Min_3_3V_PS_nocap_min = 1000 * rms(Min_3_3V_PS_nocap)/10.7;
+I_Min_J_Link_nocap_min  = 1000 * rms(Min_J_Link_nocap)/10.7;
+
+Avg_Pwr_1_9V_PS_cap_min  = 1.9 * I_Min_1_9V_PS_cap_min;
+Avg_Min_1_9V_PS_nocap_min = 1.9 * I_Min_1_9V_PS_nocap_min;
+
+Avg_Pwr_2_4V_PS_nocap_min  = 2.4 * I_Min_2_4V_PS_nocap_min;
+Avg_Min_2_8V_PS_nocap_min = 2.8 * I_Min_2_8V_PS_nocap_min;
+
+Avg_Pwr_3_3V_PS_nocap_min  = 3.3 * I_Min_3_3V_PS_nocap_min;
+Avg_Min_J_Link_PS_nocap_min = 3.4 * I_Min_J_Link_nocap_min;
+
+fprintf('MINIMUM PROGRAM \n\n\n');
+
+fprintf('1.9V PS w/cap Irms :     %.4f mA \n', I_Min_1_9V_PS_cap_min);
+fprintf('1.9V PS w/out cap Irms:  %.4f mA \n', I_Min_1_9V_PS_nocap_min);
+fprintf('2.4V PS w/out cap Irms : %.4f mA \n', I_Min_2_4V_PS_nocap_min);
+
+fprintf('2.8V PS w/out cap Irms:    %.4f mA \n', I_Min_2_8V_PS_nocap_min);
+fprintf('3.3V PS w/out cap Irms :   %.4f mA \n', I_Min_3_3V_PS_nocap_min);
+fprintf('J-Link PS w/out cap Irms : %.4f mA \n\n', I_Min_J_Link_nocap_min);
+
+fprintf('1.9V PS w/cap Avg Power : %.4f mW \n', Avg_Pwr_1_9V_PS_cap_min);
+fprintf('1.9V PS w/out cap Power:   %.4f mW \n', Avg_Min_1_9V_PS_nocap_min);
+fprintf('2.4V PS w/out cap Power :  %.4f mW \n', Avg_Pwr_2_4V_PS_nocap_min);
+
+fprintf('2.8V PS w/out cap Power:    %.4f mW \n', Avg_Min_2_8V_PS_nocap_min);
+fprintf('3.3V PS w/out cap Power :   %.4f mW \n', Avg_Pwr_3_3V_PS_nocap_min);
+fprintf('J-Link PS w/out cap Power : %.4f mW \n', Avg_Min_J_Link_PS_nocap_min);
+
+%% ---------------- PLOT 1 ----------------
+figure("Name", "Full Program", "Color", "w");
+set(gcf,...
+    'Color','[0.5 0.5 0.5]',...
+    'Position',[100 100 1000 800]);
+grid on;
+
+subplot(3,1,1)
+plot(Time(1:length(Full_1_9V_PS_nocap)), (1000 * Full_1_9V_PS_nocap/10.7), ...
+    'LineWidth',1.5,'Color',[0 0.4470 0.7410])
+hold on
+yline(Irms_1_9V_nocap, 'LineWidth', 1.5, 'Color', [0 0.4470 0.7410]);
+hold off
+grid on
+box on
+set(gca,'Color','w','FontSize',12,'LineWidth',1.2,'XColor','k','YColor','k')
+
+xlabel('Time (s)','FontWeight','bold','Color','k')
+ylabel('Current (mA)','FontWeight','bold','Color','k')
+
+title(sprintf(['1.9V Power Supply (w/out cap)\n' ...
+    'I_{RMS} = %.2f mA    P = %.2f mW'], ...
+    Irms_1_9V_nocap, Avg_Pwr_1_9V_nocap), ...
+    'FontWeight','bold','FontSize',13,'Color','k')
+
+
+subplot(3,1,2)
+plot(Time(1:length(Full_3_3V_PS_cap)), (1000 * Full_3_3V_PS_cap/10.7), ...
+    'LineWidth',1.5,'Color',[0.8500 0.3250 0.0980])
+hold on
+yline(Irms_3_3V_cap, 'LineWidth', 1.5, 'Color', [0 0.4470 0.7410]);
+hold off
+grid on
+box on
+set(gca,'Color','w','FontSize',12,'LineWidth',1.2,'XColor','k','YColor','k')
+
+xlabel('Time (s)','FontWeight','bold','Color','k')
+ylabel('Current (mA)','FontWeight','bold','Color','k')
+
+title(sprintf(['3.3V Power Supply (w/ cap)\n' ...
+    'I_{RMS} = %.2f mA    P = %.2f mW'], ...
+    Irms_3_3V_cap, Avg_Pwr_3_3V_cap), ...
+    'FontWeight','bold','FontSize',13,'Color','k')
+
+
+subplot(3,1,3)
+plot(Time(1:length(Full_3_3V_PS_nocap)), (1000 * Full_3_3V_PS_nocap/10.7), ...
+    'LineWidth',1.5,'Color',[0.4660 0.6740 0.1880])
+hold on
+yline(Irms_3_3V_nocap, 'LineWidth', 1.5, 'Color', [0 0.4470 0.7410]);
+hold off
+
+grid on
+box on
+set(gca,'Color','w','FontSize',12,'LineWidth',1.2,'XColor','k','YColor','k')
+
+xlabel('Time (s)','FontWeight','bold','Color','k')
+ylabel('Current (mA)','FontWeight','bold','Color','k')
+
+title(sprintf(['3.3V Power Supply (w/out cap)\n' ...
+    'I_{RMS} = %.2f mA    P = %.2f mW'], ...
+    Irms_3_3V_nocap, Avg_Pwr_3_3V_nocap), ...
+    'FontWeight','bold','FontSize',13,'Color','k')
+
+
+
+%% ---------------- PLOT 3 ----------------
+
+figure("Name", "Minimal Program", "Color", "[0.5 0.5 0.5]");   % figure background: black
+set(gcf,...
+    'Color','[0.5 0.5 0.5]',...
+    'Position',[100 100 1000 800]);
+
+subplot(3,1,1);
+plot(Time, (1000*Min_1_9V_PS_cap/10.7), "LineWidth", 1.2);
+hold on
+plot(Time, (1000*Min_1_9V_PS_nocap/10.7), "LineWidth", 1.2);
+hold off
+grid on
+box on
+set(gca,'Color','w','FontSize',12,'LineWidth',1.2,'XColor','k','YColor','k')  % axes bg: white, ticks/labels: black
+xlabel('Time (s)','FontWeight','bold','Color','k')
+ylabel('Current (mA)','FontWeight','bold','Color','k')
+title("1.9V Power Supply with and without capacitor",'Color','k');
+legend("1.9V Power Supply (w/ cap)", ...
+       "1.9V Power Supply (w/out cap)", ...
+       "Location", "best");
+
+subplot(3,1,2);
+plot(Time,(1000* Min_2_4V_PS_nocap/10.7), "LineWidth", 1.2);
+hold on
+plot(Time, (1000*Min_2_8V_PS_nocap/10.7), "LineWidth", 1.2);
+hold off
+grid on
+box on
+set(gca,'Color','w','FontSize',12,'LineWidth',1.2,'XColor','k','YColor','k')
+xlabel('Time (s)','FontWeight','bold','Color','k')
+ylabel('Current (mA)','FontWeight','bold','Color','k')
+title("2.4V vs 2.8V Power Supply (w/out cap)",'Color','k');
+legend("2.4V Power Supply (w/out cap)", ...
+       "2.8V Power Supply (w/out cap)", ...
+       "Location", "best");
+
+subplot(3,1,3);
+Time2 = Time(1:79639);
+plot(Time2, (1000*Min_3_3V_PS_nocap/10.7), "LineWidth", 1.2);
+hold on
+plot(Time, (1000*Min_J_Link_nocap/10.7), "LineWidth", 1.2);
+hold off
+grid on
+box on
+set(gca,'Color','w','FontSize',12,'LineWidth',1.2,'XColor','k','YColor','k')
+xlabel('Time (s)','FontWeight','bold','Color','k')
+ylabel('Current (mA)','FontWeight','bold','Color','k')
+title("J-Link Powered vs 3.3V Power Supply (w/out cap)",'Color','k');
+legend("3.3V Power Supply (w/out cap)", ...
+       "J-Link (w/out cap)", ...
+       "Location", "best");
+

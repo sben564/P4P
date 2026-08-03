@@ -51,10 +51,10 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 #define UART_WAIT_FOR_BUF_DELAY K_MSEC(50)
 #define UART_WAIT_FOR_RX CONFIG_BT_NUS_UART_RX_WAIT_TIME
 
-#define ACCEL_SAMPLE_RATE_HZ 10
+#define ACCEL_SAMPLE_RATE_HZ 100
 #define ACCEL_INTERVAL_MS (1000 / ACCEL_SAMPLE_RATE_HZ) 
 
-#define SAMPLES_PER_PACKET 20  // 4 header + 20×6 = 124 bytes — safe under 244
+#define SAMPLES_PER_PACKET 20  // 5 header + 20×6 = 125 bytes — safe under 244
 #define LIS3DH_ADDR 0x19  // change to 0x18 if SA0 pin is low
 #define LIS3DH_CTRL_REG2 0x21
 
@@ -65,12 +65,13 @@ typedef struct {
 } __attribute__((packed)) accel_sample_t;
 
 /* compile-time check — will error if packet exceeds BLE payload */
-BUILD_ASSERT((4 + SAMPLES_PER_PACKET * sizeof(accel_sample_t)) <= 244,
+BUILD_ASSERT((5 + SAMPLES_PER_PACKET * sizeof(accel_sample_t)) <= 244,
              "Packet too large for BLE MTU");
 
 // Static buffer holding pending samples
 static accel_sample_t sample_buf[SAMPLES_PER_PACKET];
 static uint8_t sample_count = 0;
+static uint8_t pkt_seq = 0; 
 
 K_SEM_DEFINE(accel_sem, 0, 1);  // initial=0, max=1
 K_SEM_DEFINE(ble_init_ok, 0, 1); 
@@ -140,6 +141,9 @@ static inline int16_t sv_to_i16(struct sensor_value *v)
 
 static void send_accel_over_ble(void)
 {
+
+	static uint32_t fetch_fail_count = 0; 
+	
     if (!device_is_ready(accel_dev)) {
         LOG_ERR("Accel device NOT ready");
         return;
@@ -153,7 +157,8 @@ static void send_accel_over_ble(void)
 
     if (sensor_sample_fetch(accel_dev) ||
         sensor_channel_get(accel_dev, SENSOR_CHAN_ACCEL_XYZ, accel)) {
-        LOG_ERR("Accel read failed");
+        fetch_fail_count++;
+        LOG_WRN("Accel read failed (%u times so far)", fetch_fail_count);
         return;
     }
 
@@ -167,24 +172,59 @@ static void send_accel_over_ble(void)
     if (sample_count >= SAMPLES_PER_PACKET) {
 
         /* Packet layout: [0xAC][count][interval_lo][interval_hi][...samples...] */
-        uint8_t pkt[4 + SAMPLES_PER_PACKET * sizeof(accel_sample_t)];
+        uint8_t pkt[5 + SAMPLES_PER_PACKET * sizeof(accel_sample_t)];
         pkt[0] = 0xAC;
-        pkt[1] = SAMPLES_PER_PACKET;
-        pkt[2] = ACCEL_INTERVAL_MS & 0xFF;
-        pkt[3] = (ACCEL_INTERVAL_MS >> 8) & 0xFF;
-        memcpy(&pkt[4], sample_buf, sizeof(sample_buf));
+        pkt[1] = pkt_seq++;
+		pkt[2] = SAMPLES_PER_PACKET;
+        pkt[3] = ACCEL_INTERVAL_MS & 0xFF;
+        pkt[4] = (ACCEL_INTERVAL_MS >> 8) & 0xFF;
+        memcpy(&pkt[5], sample_buf, sizeof(sample_buf));
+
+		LOG_INF("TX seq=%d: %d samples @ %dms", pkt[1], SAMPLES_PER_PACKET, ACCEL_INTERVAL_MS);
+		for (int i = 0; i< SAMPLES_PER_PACKET; i++) {
+			//int whole = sample_buf[i].z / 100;
+			//int frac = abs(sample_buf[i].z % 100);
+			//LOG_INF("  [%3d] %s%d.%02d", i, (sample_buf[i].z < 0 && whole == 0) ? "-" : "", whole, frac);
+		}
 
         int err = bt_nus_send(NULL, pkt, sizeof(pkt));
         if (err) {
             LOG_WRN("BLE send failed: %d", err);
         } else {
-            LOG_INF("Sent %d samples (%d bytes)", SAMPLES_PER_PACKET, (int)sizeof(pkt));
+            //LOG_INF("Sent %d samples (%d bytes)", SAMPLES_PER_PACKET, (int)sizeof(pkt));
         }
 
         sample_count = 0;   /* reset buffer */
     }
 }
 /* ─────────────────────────────────────────────────── */
+
+static void lis3dh_check_odr(void)
+{
+    const struct device *i2c_dev =
+        DEVICE_DT_GET(DT_BUS(DT_COMPAT_GET_ANY_STATUS_OKAY(st_lis2dh)));
+
+    if (!device_is_ready(i2c_dev)) {
+        LOG_ERR("I2C bus not ready for ODR check");
+        return;
+    }
+
+    uint8_t reg = 0x20; // CTRL_REG1
+    uint8_t val = 0;
+    int err = i2c_write_read(i2c_dev, LIS3DH_ADDR, &reg, 1, &val, 1);
+    if (err) {
+        LOG_ERR("Failed to read CTRL_REG1: %d", err);
+        return;
+    }
+
+    uint8_t odr_bits = (val >> 4) & 0x0F;
+    static const int odr_table[] = {
+        0, 1, 10, 25, 50, 100, 200, 400, 1620, 1344 /* or 5376 in LP mode */
+    };
+    int odr_hz = (odr_bits < ARRAY_SIZE(odr_table)) ? odr_table[odr_bits] : -1;
+
+    LOG_INF("CTRL_REG1=0x%02X, ODR bits=0x%X -> %d Hz", val, odr_bits, odr_hz);
+}
 
 /* ── NEW: enable LIS3DH hardware high-pass filter (gravity cancellation) ── */
 static int lis3dh_enable_hpf(void)
@@ -486,8 +526,8 @@ static void connected(struct bt_conn *conn, uint8_t err)
     // };
 	// 3. connection interval AFTER confirming connection is valid
 	struct bt_le_conn_param param = {
-    .interval_min = ACCEL_INTERVAL_MS * SAMPLES_PER_PACKET/2,  
-    .interval_max = ACCEL_INTERVAL_MS * SAMPLES_PER_PACKET/2,
+    .interval_min = ACCEL_INTERVAL_MS * SAMPLES_PER_PACKET/2.5,  
+    .interval_max = ACCEL_INTERVAL_MS * SAMPLES_PER_PACKET/2.5,
     .latency      = 0,
     .timeout      = 400,
 };
@@ -733,7 +773,8 @@ int main(void)
     	} else {
         	LOG_INF("ODR set to %d Hz", ACCEL_SAMPLE_RATE_HZ);
     	}
-		lis3dh_enable_hpf();
+		//lis3dh_enable_hpf();
+		lis3dh_check_odr(); 
 	}
 
 	err = uart_init();

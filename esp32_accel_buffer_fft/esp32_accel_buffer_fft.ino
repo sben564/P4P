@@ -12,6 +12,8 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 #define NUS_TX_CHAR_UUID  "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
 
 #define MAX_SAMPLES_PER_PACKET 40 
+#define EXCLUDE_FREQ_LOW  30.0   // Hz
+#define EXCLUDE_FREQ_HIGH 36.0   // Hz
 
 // ── FFT config ────────────────────────────────────────────────────────────────
 #define FFT_SAMPLES     128          // must be power of 2
@@ -22,6 +24,9 @@ static double vImag[FFT_SAMPLES];
 static int fft_index = 0;
 static float dominant_freq = 0.0f;
 static bool fft_ready = false;
+
+static bool print_pending = false;
+static double print_buf[FFT_SAMPLES];
 
 /* Create FFT object */
 ArduinoFFT<double> FFT = ArduinoFFT<double>(vReal, vImag, FFT_SAMPLES, SAMPLE_RATE_HZ);
@@ -47,38 +52,121 @@ static hw_timer_t  *sampleTimer       = NULL;
 static portMUX_TYPE timerMux          = portMUX_INITIALIZER_UNLOCKED;
 static volatile bool showNextSample   = false;
 
-// -- FFT Calculation --
-void PerformFFT() {
+void PerformFFT(uint8_t first_seq, uint8_t last_seq) {
 
-    // Apply AHmming Window to reduce spectral leakage
+    // Print raw samples BEFORE windowing corrupts vReal
+    // Serial.printf("Raw samples (seq %d → %d):\n", first_seq, last_seq);
+    // for (int i = 0; i < FFT_SAMPLES; i++) {
+    //     Serial.printf("  [%3d] %.4f\n", i, vReal[i]);
+    // }
+    // for (int i = 0; i < FFT_SAMPLES; i++) {
+    // Serial.printf("%.4f\n", vReal[i]);
+    // }
+
     FFT.windowing(FFTWindow::Hamming, FFTDirection::Forward);
-
-    //Compute the FFT
-    FFT.compute(FFTDirection::Forward); 
-
-    //Convert complex output to magnitude
+    FFT.compute(FFTDirection::Forward);
     FFT.complexToMagnitude();
 
-    //Find the dominant frequency
-    double peak = FFT.majorPeak();
-
-    //Ignore DC component (0Hz) and very low frequencies
-    if (peak < 1.0) peak = 0.0;
-
-    dominant_freq = (float)peak;
-    fft_ready = true;
-
-    // Print full spectrum to Serial for debugging
-    Serial.printf("FFT complete — dominant: %.2f Hz\n", dominant_freq);
-    Serial.println("Spectrum (bin: freq Hz = magnitude):");
-    for (int i = 1; i < FFT_SAMPLES / 2; i++) {
+    // Find lowest-frequency bin above threshold (the fundamental)
+    // Skips DC (i=0) and near-DC (i=1) which is your 0.8Hz noise
+    double fundamental_freq = 0.0;
+    for (int i = 2; i < FFT_SAMPLES / 2; i++) {
         float bin_freq = (float)i * SAMPLE_RATE_HZ / FFT_SAMPLES;
-        if (vReal[i] > 10.0) {   // only print significant bins
-            Serial.printf("  bin %3d: %5.1f Hz = %.1f\n", i, bin_freq, vReal[i]);
+
+        // Clamp to Nyquist just in case
+        if (bin_freq > SAMPLE_RATE_HZ / 2.0) break;
+
+        // Skip table resonance band
+        //if (bin_freq >= EXCLUDE_FREQ_LOW && bin_freq <= EXCLUDE_FREQ_HIGH) continue;
+
+        if (vReal[i] > 70.0) {
+            float highest_mag = vReal[i];
+            //Check next 3 bins
+            for (int j = (i + 1); j < (i+4); j++) {
+                if (vReal[j] > highest_mag) {
+                    bin_freq = (float)j * SAMPLE_RATE_HZ / FFT_SAMPLES;
+                    highest_mag = vReal[j];
+                }
+            }
+            fundamental_freq = bin_freq;
+            break;
         }
     }
 
+    dominant_freq = (float)fundamental_freq;
+    fft_ready = true;
+
+    // Print ALL bins for external FFT comparison
+    // Serial.println("BIN,FREQ_HZ,MAGNITUDE");
+    //     for (int i = 0; i < FFT_SAMPLES / 2; i++) {
+    //     float bin_freq = (float)i * SAMPLE_RATE_HZ / FFT_SAMPLES;
+    //     Serial.printf("%d,%.4f,%.4f\n", i, bin_freq, vReal[i]);
+
+
+    // Debug print
+    Serial.printf("FFT complete — dominant: %.2f Hz\n", dominant_freq);
+    Serial.println("Spectrum (bin: freq Hz = magnitude):");
+    for (int i = 1; i < FFT_SAMPLES / 2; i++) {
+         float bin_freq = (float)i * SAMPLE_RATE_HZ / FFT_SAMPLES;
+         if (vReal[i] > 70.0) {
+             Serial.printf("  bin %3d: %5.1f Hz = %.1f\n", i, bin_freq, vReal[i]);
+         }
+        }
 }
+
+
+// -- FFT Calculation --
+// void PerformFFT() {
+
+//     // Apply AHmming Window to reduce spectral leakage
+//     FFT.windowing(FFTWindow::Hamming, FFTDirection::Forward);
+
+//     //Compute the FFT
+//     FFT.compute(FFTDirection::Forward); 
+
+//     //Convert complex output to magnitude
+//     FFT.complexToMagnitude();
+
+//     //Find the dominant frequency
+//     double peak = FFT.majorPeak();
+
+//     // Get the magnitude of the peak bin to validate it's real signal
+//     double peak_magnitude = 0.0;
+//     for (int i = 1; i < FFT_SAMPLES / 2; i++) {
+//         if (vReal[i] > peak_magnitude) {
+//         peak_magnitude = vReal[i];
+//         }
+//     }
+
+//     Serial.printf("Peak mag: %.1f at %.2f Hz\n", peak_magnitude, peak);
+
+//     // Clamp to Nyquist limit — anything above is aliased garbage
+//     if (peak > (SAMPLE_RATE_HZ / 2.0)) {
+//     peak = 0.0;
+//     }
+
+//     // If peak magnitude is below threshold, treat as no vibration
+//     if (peak_magnitude < 10.0 || peak < 1.0) {
+//         peak = 0.0;
+//     }
+
+//     //Ignore DC component (0Hz) and very low frequencies
+//     if (peak < 1.0) peak = 0.0;
+
+//     dominant_freq = (float)peak;
+//     fft_ready = true;
+
+//     // Print full spectrum to Serial for debugging
+//     Serial.printf("FFT complete — dominant: %.2f Hz\n", dominant_freq);
+//     Serial.println("Spectrum (bin: freq Hz = magnitude):");
+//     for (int i = 1; i < FFT_SAMPLES / 2; i++) {
+//         float bin_freq = (float)i * SAMPLE_RATE_HZ / FFT_SAMPLES;
+//         if (vReal[i] > 15.0) {   // only print significant bins
+//             Serial.printf("  bin %3d: %5.1f Hz = %.1f\n", i, bin_freq, vReal[i]);
+//         }
+//     }
+
+// }
 
 // ── Timer ISR — fires every interval_ms ──────────────────────────────────────
 void IRAM_ATTR onSampleTimer()
@@ -214,9 +302,9 @@ void showFFT(float freq, float ax, float ay ,float az)
 // ── Binary packet unpacker ────────────────────────────────────────────────────
 bool parseBinaryPacket(const uint8_t *data, size_t length,
                        AccelSample *samples_out, uint8_t &count_out,
-                       uint16_t &interval_out)
+                       uint16_t &interval_out, uint8_t &seq_out)
 {
-    if (length < 4) {
+    if (length < 5) {
         Serial.println("Packet too short");
         return false;
     }
@@ -224,18 +312,18 @@ bool parseBinaryPacket(const uint8_t *data, size_t length,
         Serial.printf("Bad magic: 0x%02X\n", data[0]);
         return false;
     }
+    seq_out = data[1];
+    count_out = data[2];
+    interval_out = data[3] | ((uint16_t)data[4] << 8);
 
-    count_out    = data[1];
-    interval_out = data[2] | ((uint16_t)data[3] << 8);
-
-    size_t expected = 4 + count_out * sizeof(AccelSample);
+    size_t expected = 5 + count_out * sizeof(AccelSample);
     if (length < expected) {
         Serial.printf("Packet length mismatch: got %d, expected %d\n",
                       length, expected);
         return false;
     }
 
-    memcpy(samples_out, data + 4, count_out * sizeof(AccelSample));
+    memcpy(samples_out, data + 5, count_out * sizeof(AccelSample));
     return true;
 }
 
@@ -244,13 +332,31 @@ void notifyCallback(NimBLERemoteCharacteristic *pChar,
                     uint8_t *pData, size_t length, bool isNotify)
 {
     AccelSample samples[MAX_SAMPLES_PER_PACKET];
-    uint8_t  count       = 0;
+    uint8_t  count = 0;
     uint16_t interval_ms = 0;
+    uint8_t seq = 0;
 
-    if (!parseBinaryPacket(pData, length, samples, count, interval_ms)) {
+    static uint8_t last_seq = 0xFF;
+    static uint8_t fft_window_first_seq = 0xFF;
+    static uint8_t fft_window_last_seq  = 0xFF;
+
+    if (!parseBinaryPacket(pData, length, samples, count, interval_ms,seq)) {
         return;
     }
 
+    // ── Gap detection ──
+    if (last_seq != 0xFF) {
+        uint8_t expected = last_seq + 1;
+        if (seq != expected) {
+            Serial.printf("⚠ SEQ GAP: expected %d got %d (%d dropped)\n",
+                          expected, seq, (uint8_t)(seq - expected));
+        }
+    }
+    last_seq = seq;
+
+    if (fft_index == 0) {
+    fft_window_first_seq = seq;
+    }
     // ── Feed samples into FFT accumulation buffer ─────────────────────────
     for (int i = 0; i < count && fft_index < FFT_SAMPLES; i++) {
 
@@ -262,14 +368,16 @@ void notifyCallback(NimBLERemoteCharacteristic *pChar,
         float az = samples[i].z / 100.0f;
 
         // Total magnitude — captures vibration in any direction
-        vReal[fft_index] = sqrt(ax*ax + ay*ay + az*az);
+        //vReal[fft_index] = sqrt(ax*ax + ay*ay + az*az);
+        vReal[fft_index] = az;
         vImag[fft_index] = 0.0;   // imaginary part always 0 for real signals
         fft_index++;
     }
 
     // When buffer full, run FFT then reset for next window
     if (fft_index >= FFT_SAMPLES) {
-        PerformFFT();
+        fft_window_last_seq = seq;
+        PerformFFT(fft_window_first_seq, fft_window_last_seq);
         fft_index = 0;   // reset — start accumulating next window
     }
     // ─────────────────────────────────────────────────────────────────────
@@ -284,8 +392,8 @@ void notifyCallback(NimBLERemoteCharacteristic *pChar,
 
     startPlaybackTimer(interval_ms);
 
-    Serial.printf("Packet received: %d samples @ %dms interval\n",
-                  count, interval_ms);
+    //Serial.printf("Packet received: %d samples @ %dms interval\n",
+                  //count, interval_ms);
 }
 
 // ── Scan callback ─────────────────────────────────────────────────────────────
@@ -294,7 +402,8 @@ class ScanCallbacks : public NimBLEScanCallbacks
     void onResult(const NimBLEAdvertisedDevice *advertisedDevice) override
     {
         if (advertisedDevice->isAdvertisingService(
-                NimBLEUUID("6E400001-B5A3-F393-E0A9-E50E24DCCA9E"))) {
+                NimBLEUUID("6E400001-B5A3-F393-E0A9-E50E24DCCA9E"))
+                && advertisedDevice->getName() == "Nordic_UART_Lihua") {
             Serial.println("Found NUS device, connecting...");
             NimBLEDevice::getScan()->stop();
             pTargetDevice = const_cast<NimBLEAdvertisedDevice *>(advertisedDevice);
@@ -312,23 +421,42 @@ bool connectToServer()
     pClient = NimBLEDevice::createClient();
 
     if (!pClient->connect(pTargetDevice)) {
+        Serial.println("FAILED: connect()");
         showStatus("Connect failed", "Retrying...");
         return false;
     }
+    Serial.println("TCP connected");
 
     // 100ms interval to match nRF side (80 × 1.25ms = 100ms)
     pClient->updateConnParams(80, 80, 0, 400);
     Serial.println("Connection params updated: 100ms interval");
 
     NimBLERemoteService *pService = pClient->getService(NUS_SERVICE_UUID);
-    if (!pService) { pClient->disconnect(); return false; }
+    if (!pService) {
+        Serial.println("FAILED: getService() returned null"); 
+        pClient->disconnect(); return false; }
+
+    Serial.println("Service found");
+
+    // ── DEBUG: print all characteristics in this service ──
+const std::vector<NimBLERemoteCharacteristic*> &chars = pService->getCharacteristics(true);
+for (auto &c : chars) {
+        Serial.printf("  Char UUID: %s | props: notify=%d read=%d write=%d\n",
+            c->getUUID().toString().c_str(),
+            c->canNotify(), c->canRead(), c->canWrite());
+    }
 
     NimBLERemoteCharacteristic *pTxChar = pService->getCharacteristic(NUS_TX_CHAR_UUID);
-    if (!pTxChar) { pClient->disconnect(); return false; }
+    if (!pTxChar) { 
+        Serial.println("FAILED: getCharacteristic() returned null");
+        pClient->disconnect(); return false; }
 
     if (pTxChar->canNotify()) {
-        pTxChar->subscribe(true, notifyCallback);
+        bool ok = pTxChar->subscribe(true, notifyCallback);
+        Serial.printf("subscribe() returned: %s\n", ok ? "true" : "false");
         showStatus("Connected!", "Waiting for data...");
+    } else {
+        Serial.println("FAILED: canNotify() returned false");
     }
 
     connected = true;
@@ -398,8 +526,8 @@ void loop()
             float az = playback_buf[idx].z / 100.0f;
             
             showFFT(dominant_freq, ax, ay, az);
-            Serial.printf("[%2d/%2d] X=%.2f Y=%.2f Z=%.2f | Vib: %.1fHz\n",
-                          idx + 1, playback_count, ax, ay, az, dominant_freq);
+            //Serial.printf("[%2d/%2d] X=%.2f Y=%.2f Z=%.2f | Vib: %.1fHz\n",
+                          //idx + 1, playback_count, ax, ay, az, dominant_freq);
             //showAccelerometer(ax, ay, az);
             //Serial.printf("[%2d/%2d] X=%.2f Y=%.2f Z=%.2f\n",
                           //idx + 1, playback_count, ax, ay, az);

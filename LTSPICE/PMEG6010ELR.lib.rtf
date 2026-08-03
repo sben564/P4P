@@ -1,0 +1,77 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2822
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fmodern\fcharset0 Courier;}
+{\colortbl;\red255\green255\blue255;\red0\green0\blue0;\red255\green255\blue255;}
+{\*\expandedcolortbl;;\cssrgb\c0\c1\c1;\cssrgb\c100000\c100000\c99985;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\deftab720
+\pard\pardeftab720\partightenfactor0
+
+\f0\fs26 \cf2 \expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec3 *\
+*******************************************\
+*\
+*PMEG6010ELR\
+*\
+*NXP Semiconductors\
+*\
+*60V, 1A low leakage current Schottky barrier rectifiers\
+*\
+*\
+*\
+*\
+*IFSM = 50A   @ tp = 8ms\
+*VF   = 605mV @ IF = 1A\
+*\
+*\
+*\
+*\
+*\
+*\
+*\
+*\
+*\
+*\
+*Package pinning does not match Spice model pinning.\
+*Package: SOT123W\
+*\
+*Package Pin 1: Cathode\
+*Package Pin 2: Anode    \
+*\
+*\
+*\
+*\
+*Simulator: SPICE3\
+*\
+*******************************************\
+*#\
+.SUBCKT PMEG6010ELR 1 2\
+*\
+* The resistor R1 and the diode D2 do not reflect\
+* physical devices. Instead they\
+* improves modeling in the reverse\
+* mode of operation.\
+*\
+R1 1 2 1.6E+009\
+D1 1 2 DIODE1 \
+D2 1 2 DIODE2\
+*\
+.MODEL DIODE1 D\
++ IS = 9E-010\
++ N = 0.94\
++ BV = 74\
++ IBV = 0.0006102\
++ RS = 100\
++ CJO = 1.659E-010\
++ VJ = 0.7\
++ M = 0.5\
++ FC = 0\
++ TT = 0\
++ EG = 0.69\
++ XTI = 2\
+.MODEL DIODE2 D\
++ IS = 2E-009\
++ N = 1.02\
++ RS = 0.09\
+.ENDS\
+*\
+}
